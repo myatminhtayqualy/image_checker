@@ -35,6 +35,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import zipfile
 from collections import deque
@@ -505,18 +506,16 @@ def load_json_file(path, default):
         return default
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Could not read JSON file {path}: {e}") from e
 
 
 def save_json_file(path, data):
-    temporary_path = path.with_suffix(".tmp")
-    temporary_path.write_text(
+    path.write_text(
         json.dumps(data, indent=2),
         encoding="utf-8",
     )
-    temporary_path.replace(path)
 
 
 # ---------------------------------------------------------
@@ -788,6 +787,7 @@ def main():
 
     parser.add_argument(
         "url",
+        nargs="?",
         help="Published project URL"
     )
 
@@ -861,6 +861,47 @@ def main():
 
     if not isinstance(config, dict):
         print(f"[ERROR] Config file must contain a JSON object: {args.config}")
+        sys.exit(1)
+
+    configured_sites = config.get("sites", [])
+    if configured_sites and not args.url:
+        if (
+            not isinstance(configured_sites, list)
+            or not all(isinstance(site, str) and site.strip()
+                       for site in configured_sites)
+        ):
+            print("[ERROR] Config 'sites' must be a list of non-empty URLs.")
+            sys.exit(1)
+
+        command_base = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--config",
+            args.config,
+            "--forbidden",
+            args.forbidden,
+            "--output",
+            args.output,
+            "--threshold",
+            str(args.threshold),
+            "--match-threshold",
+            str(args.match_threshold),
+        ]
+
+        failed = False
+        for site in configured_sites:
+            print()
+            print(f"========== Checking {site} ==========")
+            result = subprocess.run(command_base + [site])
+            if result.returncode != 0:
+                failed = True
+
+        sys.exit(1 if failed else 0)
+
+    if not args.url:
+        print(
+            "[ERROR] Provide a URL or add site URLs to config 'sites'."
+        )
         sys.exit(1)
 
     config_auth = config.get("auth", {})
@@ -1065,7 +1106,6 @@ def main():
                 i
             )
             download_cache[image_url] = downloaded.name
-            save_json_file(download_cache_path, download_cache)
 
         try:
 
@@ -1116,6 +1156,8 @@ def main():
             "score": best_score,
             "status": status,
         })
+
+    save_json_file(download_cache_path, download_cache)
 
     # -----------------------------------------
     # 4. Report

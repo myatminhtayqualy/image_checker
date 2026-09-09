@@ -1,4 +1,8 @@
 {
+  "sites": [
+    "https://www.atsuko-dental-office.jp/",
+    "https://www.moriguchi-tsuda-ortho.com/"
+  ],
   "auth": {
     "username": "testuser",
     "password": "change-me"

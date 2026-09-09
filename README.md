@@ -58,6 +58,31 @@ credentials once:
 are used for every site run. Override the file with `--config path\to\file.json`
 when needed.
 
+You can also put multiple sites in `config.json` and run them all in order:
+
+```json
+{
+  "sites": [
+    "https://www.atsuko-dental-office.jp/",
+    "https://www.moriguchi-tsuda-ortho.com/"
+  ],
+  "auth": {
+    "username": "testuser",
+    "password": "change-me"
+  },
+  "max_pages": 1000
+}
+```
+
+Then run:
+
+```powershell
+python checker.py
+```
+
+Each site keeps its own `results/<domain>/` folder, report, and download
+cache. A single site can still be run with `python checker.py https://site.example`.
+
 ## Run one project
 
 ```powershell
