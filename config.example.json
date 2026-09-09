@@ -1,0 +1,7 @@
+{
+  "auth": {
+    "username": "testuser",
+    "password": "change-me"
+  },
+  "max_pages": 1000
+}

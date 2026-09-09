@@ -9,6 +9,7 @@ clinic-image-checker/
 │
 ├── checker.py
 ├── requirements.txt
+├── config.example.json
 │
 ├── forbidden-images/
 │   ├── forbidden-001.zip
@@ -38,6 +39,25 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Configuration
+
+Copy `config.example.json` to `config.json` and set the shared Basic Auth
+credentials once:
+
+```json
+{
+  "auth": {
+    "username": "testuser",
+    "password": "change-me"
+  },
+  "max_pages": 1000
+}
+```
+
+`config.json` is local-only and should not be committed. The same credentials
+are used for every site run. Override the file with `--config path\to\file.json`
+when needed.
+
 ## Run one project
 
 ```powershell
@@ -66,6 +86,37 @@ Open `report.html` in Chrome.
 
 The report shows only MATCH and POSSIBLE results, so you don't have to look through every safe image.
 
+## Forbidden-image cache
+
+The first run creates `forbidden-images/.image-checker-cache.json`.
+Unchanged image files and ZIP archives reuse their cached pHash on later runs,
+so ZIP files do not need to be opened again. The cache is automatically
+refreshed when a file's size or modified time changes.
+
+## HTTP Basic Auth
+
+The recommended method is the shared `config.json` above. Credentials can
+still be provided per run with command-line options:
+
+```powershell
+python checker.py https://test.example.com `
+  --auth-username testuser `
+  --auth-password-file .\test-password.txt
+```
+
+For repeated use, environment variables avoid putting the password in shell
+history:
+
+```powershell
+$env:IMAGE_CHECKER_USERNAME = "testuser"
+$env:IMAGE_CHECKER_PASSWORD = "test-password"
+python checker.py https://test.example.com
+```
+
+`--auth-username` and `--auth-password` also work directly. Both username and
+password must be supplied together. Credentials are only sent through the
+HTTP session and are not written to the HTML report.
+
 ## Similarity thresholds
 
 Default:
@@ -82,11 +133,20 @@ Change them if needed:
 python checker.py https://example-clinic.jp --threshold 85 --match-threshold 93
 ```
 
+## Site crawling and output reuse
+
+The checker now follows same-domain links and collects image URLs from every
+visited HTML page. `max_pages` defaults to 1000 to prevent accidental
+infinite crawls; increase it in `config.json` for larger sites.
+The console output and HTML report show how many pages were crawled. `www` and
+non-`www` links for the same domain are treated as the same site.
+
+Each domain always reuses `results/<domain>/`. The
+`results/<domain>/.download-cache.json` manifest reuses already downloaded
+images on later runs, so rerunning a project does not create duplicate image
+files. The HTML report is regenerated with the current crawl results.
+
 ## Important
-
-This first test version crawls the supplied page only.
-
-It does NOT yet recursively visit every internal page.
 
 Also, visual similarity is a screening tool, not legal proof. Always manually verify MATCH/POSSIBLE results before reporting a copyright/image-use issue.
 

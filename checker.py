@@ -32,11 +32,14 @@ You can change them:
 import argparse
 import hashlib
 import io
+import json
+import os
 import re
 import sys
 import zipfile
+from collections import deque
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -77,7 +80,7 @@ def is_image_url(url):
 def add_url(urls, url, base_url):
     url = clean_url(url, base_url)
 
-    if url and is_image_url(url):
+    if url:
         urls.add(url)
 
 
@@ -132,6 +135,83 @@ def extract_image_urls(html, page_url):
     return sorted(urls)
 
 
+def extract_page_links(html, page_url, site_host):
+    soup = BeautifulSoup(html, "html.parser")
+    links = set()
+
+    for tag in soup.find_all("a", href=True):
+        link = clean_url(tag["href"], page_url)
+        if not link:
+            continue
+
+        parsed = urlparse(link)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        link_host = parsed.netloc.lower()
+        if link_host != site_host and link_host.removeprefix(
+            "www."
+        ) != site_host.removeprefix("www."):
+            continue
+
+        links.add(link)
+
+    return sorted(links)
+
+
+def crawl_site(session, site_url, max_pages=1000):
+    site_host = urlparse(site_url).netloc.lower()
+    pending = deque([site_url])
+    visited = set()
+    image_urls = set()
+
+    while pending and len(visited) < max_pages:
+        page_url = pending.popleft()
+        page_url = urldefrag(page_url)[0]
+        if page_url in visited:
+            continue
+
+        visited.add(page_url)
+        print(
+            f"      Page [{len(visited)}] "
+            f"{page_url}"
+        )
+
+        try:
+            response = session.get(page_url, timeout=25)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[WARN] Could not open page {page_url}: {e}")
+            continue
+
+        final_url = urldefrag(response.url)[0]
+        if final_url != page_url:
+            visited.add(final_url)
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if content_type and "html" not in content_type:
+            continue
+
+        image_urls.update(
+            extract_image_urls(response.text, page_url)
+        )
+
+        for link in extract_page_links(
+            response.text,
+            page_url,
+            site_host,
+        ):
+            if link not in visited:
+                pending.append(link)
+
+    if pending:
+        print(
+            f"      Page limit reached ({max_pages}); "
+            f"{len(pending)} pages not visited."
+        )
+
+    return sorted(image_urls), len(visited)
+
+
 # ---------------------------------------------------------
 # IMAGE HASH
 # ---------------------------------------------------------
@@ -165,6 +245,38 @@ def image_name_from_zip(zip_path, member):
     return f"{zip_path} -> {member}"
 
 
+def file_signature(path):
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns]
+
+
+def load_forbidden_cache(cache_path):
+    if not cache_path.exists():
+        return {}
+
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if data.get("version") != 1:
+            return {}
+        return data.get("files", {})
+    except (OSError, json.JSONDecodeError):
+        print(f"[WARN] Could not read cache: {cache_path}")
+        return {}
+
+
+def save_forbidden_cache(cache_path, cache):
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = cache_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(
+            {"version": 1, "files": cache},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    temporary_path.replace(cache_path)
+
+
 def scan_forbidden(folder):
     """
     Scan:
@@ -175,8 +287,11 @@ def scan_forbidden(folder):
     They are NOT extracted to disk.
     """
 
-    records = []
     folder = Path(folder)
+    cache_path = folder / ".image-checker-cache.json"
+    old_cache = load_forbidden_cache(cache_path)
+    new_cache = {}
+    records = []
 
     for path in folder.rglob("*"):
 
@@ -184,6 +299,35 @@ def scan_forbidden(folder):
             continue
 
         suffix = path.suffix.lower()
+        relative_name = str(path.relative_to(folder))
+
+        try:
+            signature = file_signature(path)
+        except OSError as e:
+            print(f"[WARN] Could not inspect file: {path} ({e})")
+            continue
+
+        cached = old_cache.get(relative_name)
+        if cached and cached.get("signature") == signature:
+            for cached_record in cached.get("records", []):
+                records.append({
+                    "name": (
+                        str(path)
+                        if not cached_record.get("member")
+                        else image_name_from_zip(
+                            path,
+                            cached_record["member"],
+                        )
+                    ),
+                    "hash": imagehash.hex_to_hash(
+                        cached_record["hash"]
+                    ),
+                    "source": cached_record["source"],
+                })
+            new_cache[relative_name] = cached
+            continue
+
+        cached_records = []
 
         # -----------------------------------------
         # Normal image file
@@ -196,6 +340,11 @@ def scan_forbidden(folder):
                 records.append({
                     "name": str(path),
                     "hash": h,
+                    "source": "file",
+                })
+                cached_records.append({
+                    "member": None,
+                    "hash": str(h),
                     "source": "file",
                 })
 
@@ -241,6 +390,11 @@ def scan_forbidden(folder):
                                 "hash": h,
                                 "source": "zip",
                             })
+                            cached_records.append({
+                                "member": member.filename,
+                                "hash": str(h),
+                                "source": "zip",
+                            })
 
                         except Exception as e:
                             print(
@@ -257,6 +411,13 @@ def scan_forbidden(folder):
                     f"{path}: {e}"
                 )
 
+        if cached_records:
+            new_cache[relative_name] = {
+                "signature": signature,
+                "records": cached_records,
+            }
+
+    save_forbidden_cache(cache_path, new_cache)
     return records
 
 
@@ -337,6 +498,25 @@ def save_download(data, out_dir, url, index):
     path.write_bytes(data)
 
     return path
+
+
+def load_json_file(path, default):
+    if not path.exists():
+        return default
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Could not read JSON file {path}: {e}") from e
+
+
+def save_json_file(path, data):
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(data, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
 
 
 # ---------------------------------------------------------
@@ -522,12 +702,20 @@ th {{
 {esc(site_url)}
 <br>
 
+<b>Pages crawled:</b>
+{stats["pages"]}
+<br>
+
 <b>Website images found:</b>
 {stats["found"]}
 <br>
 
 <b>Downloaded successfully:</b>
 {stats["downloaded"]}
+<br>
+
+<b>Reused from previous run:</b>
+{stats["reused"]}
 <br>
 
 <b>Forbidden images indexed:</b>
@@ -629,7 +817,56 @@ def main():
         help="High-confidence match threshold"
     )
 
+    parser.add_argument(
+        "--auth-username",
+        default=None,
+        help="HTTP Basic Auth username (or IMAGE_CHECKER_USERNAME)"
+    )
+
+    parser.add_argument(
+        "--auth-password",
+        default=None,
+        help=(
+            "HTTP Basic Auth password (or IMAGE_CHECKER_PASSWORD); "
+            "prefer the environment variable"
+        )
+    )
+
+    parser.add_argument(
+        "--auth-password-file",
+        default=None,
+        help="Read the HTTP Basic Auth password from a local file"
+    )
+
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="JSON config file for shared settings"
+    )
+
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Maximum same-site pages to crawl (default: config or 1000)"
+    )
+
     args = parser.parse_args()
+
+    try:
+        config = load_json_file(Path(args.config), {})
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
+
+    if not isinstance(config, dict):
+        print(f"[ERROR] Config file must contain a JSON object: {args.config}")
+        sys.exit(1)
+
+    config_auth = config.get("auth", {})
+    if not isinstance(config_auth, dict):
+        print("[ERROR] Config 'auth' must be a JSON object.")
+        sys.exit(1)
 
     site_url = args.url
 
@@ -699,38 +936,60 @@ def main():
         "User-Agent": USER_AGENT
     })
 
+    auth_username = (
+        args.auth_username
+        or config_auth.get("username")
+        or os.environ.get("IMAGE_CHECKER_USERNAME")
+    )
+    auth_password = (
+        args.auth_password
+        or config_auth.get("password")
+        or os.environ.get("IMAGE_CHECKER_PASSWORD")
+    )
+
+    if args.auth_password_file:
+        try:
+            auth_password = Path(
+                args.auth_password_file
+            ).read_text(encoding="utf-8").strip()
+        except OSError as e:
+            print(
+                f"[ERROR] Could not read auth password file: {e}"
+            )
+            sys.exit(1)
+
+    if bool(auth_username) != bool(auth_password):
+        print(
+            "[ERROR] Both auth username and auth password are required."
+        )
+        sys.exit(1)
+
+    if auth_username and auth_password:
+        session.auth = (auth_username, auth_password)
+        print("      HTTP Basic Auth enabled.")
+
     # -----------------------------------------
     # 2. Website
     # -----------------------------------------
 
     print()
-    print("[2/4] Crawling project page...")
+    print("[2/4] Crawling site pages...")
 
-    try:
-
-        response = session.get(
-            site_url,
-            timeout=25
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException as e:
-
-        print(
-            f"[ERROR] Could not open website: {e}"
-        )
-
+    configured_max_pages = config.get("max_pages", 1000)
+    max_pages = args.max_pages or configured_max_pages
+    if not isinstance(max_pages, int) or max_pages < 1:
+        print("[ERROR] max_pages must be a positive integer.")
         sys.exit(1)
 
-    image_urls = extract_image_urls(
-        response.text,
-        site_url
+    image_urls, pages_crawled = crawl_site(
+        session,
+        site_url,
+        max_pages,
     )
 
     print(
-        f"      Found {len(image_urls)} "
-        f"image URLs."
+        f"      Crawled {pages_crawled} pages; found "
+        f"{len(image_urls)} image URLs."
     )
 
     # -----------------------------------------
@@ -743,13 +1002,28 @@ def main():
     results = []
 
     stats = {
+        "pages": pages_crawled,
         "found": len(image_urls),
         "downloaded": 0,
+        "reused": 0,
         "forbidden": len(forbidden),
         "match": 0,
         "possible": 0,
         "safe": 0,
     }
+
+    download_cache_path = output_dir / ".download-cache.json"
+    try:
+        download_cache = load_json_file(download_cache_path, {})
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
+    if not isinstance(download_cache, dict):
+        print(
+            f"[ERROR] Download cache must be a JSON object: "
+            f"{download_cache_path}"
+        )
+        sys.exit(1)
 
     for i, image_url in enumerate(
         image_urls,
@@ -761,22 +1035,37 @@ def main():
             f"{image_url}"
         )
 
-        data = download_image(
-            session,
-            image_url
-        )
+        cached_name = download_cache.get(image_url)
+        downloaded = None
+        data = None
+        if isinstance(cached_name, str):
+            cached_path = downloads_dir / cached_name
+            if cached_path.is_file():
+                try:
+                    data = cached_path.read_bytes()
+                    make_hash(data)
+                    downloaded = cached_path
+                    stats["reused"] += 1
+                except (OSError, UnidentifiedImageError):
+                    data = None
+
+        if data is None:
+            data = download_image(session, image_url)
 
         if not data:
             continue
 
         stats["downloaded"] += 1
 
-        downloaded = save_download(
-            data,
-            downloads_dir,
-            image_url,
-            i
-        )
+        if downloaded is None:
+            downloaded = save_download(
+                data,
+                downloads_dir,
+                image_url,
+                i
+            )
+            download_cache[image_url] = downloaded.name
+            save_json_file(download_cache_path, download_cache)
 
         try:
 
@@ -854,10 +1143,16 @@ def main():
     print("DONE")
     print("========================================")
     print(
+        f"Pages crawled:       {stats['pages']}"
+    )
+    print(
         f"Website images:     {stats['found']}"
     )
     print(
         f"Downloaded:         {stats['downloaded']}"
+    )
+    print(
+        f"Reused:             {stats['reused']}"
     )
     print(
         f"Forbidden indexed:  {stats['forbidden']}"
