@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Clinic Image Check Report</title>
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    margin: 30px;
+    background: #f6f6f6;
+    color: #222;
+}
+
+h1 {
+    margin-bottom: 5px;
+}
+
+.summary {
+    margin: 15px 0 25px;
+    padding: 15px;
+    background: white;
+    border-radius: 8px;
+    line-height: 1.8;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+}
+
+th,
+td {
+    padding: 14px;
+    border: 1px solid #ddd;
+    vertical-align: top;
+    text-align: left;
+}
+
+th {
+    background: #eee;
+}
+
+.preview {
+    width: 260px;
+    height: 190px;
+    object-fit: contain;
+    background: #fafafa;
+    border: 1px solid #ddd;
+}
+
+.url {
+    max-width: 280px;
+    overflow-wrap: anywhere;
+    margin-top: 8px;
+    font-size: 12px;
+    color: #555;
+}
+
+.forbidden-name {
+    max-width: 450px;
+    overflow-wrap: anywhere;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.score {
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.match {
+    color: #b00020;
+}
+
+.possible {
+    color: #a15c00;
+}
+
+.safe-message {
+    text-align: center;
+    padding: 30px;
+    color: #187a2f;
+}
+
+</style>
+</head>
+<body>
+<h1>Clinic Image Check Report</h1>
+<div class="summary">
+<b>Site:</b>
+https://www.koumi-dc.com/test3/
+<br/>
+<b>Pages crawled:</b>
+18
+<br/>
+<b>Website images found:</b>
+164
+<br/>
+<b>Downloaded successfully:</b>
+149
+<br/>
+<b>Reused from previous run:</b>
+0
+<br/>
+<b>Forbidden images indexed:</b>
+1206
+<br/>
+<b>MATCH:</b>
+2
+<br/>
+<b>POSSIBLE:</b>
+1
+<br/>
+<b>SAFE:</b>
+146
+<br/>
+<b>MATCH threshold:</b>
+95.0%
+<br/>
+<b>POSSIBLE threshold:</b>
+88.0%
+
+</div>
+<table>
+<thead>
+<tr>
+<th>Published website image</th>
+<th>Forbidden image</th>
+<th>Similarity</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<img class="preview" src="assets/e6a624ad9d7f.jpg"/>
+<div class="url">
+                  https://www.koumi-dc.com/test3/assets/images/dentures/merit_01.jpg
+                </div>
+</td>
+<td>
+<div class="forbidden-name">
+                  forbidden-images\×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)-20260908T040207Z-1-001.zip -&gt; ×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)/×_入れ歯Fotolia_15930099_XS.jpg
+                </div>
+</td>
+<td class="score match">
+                97.6%
+              </td>
+<td>
+<b>MATCH</b>
+</td>
+</tr>
+<tr>
+<td>
+<img class="preview" src="assets/16691962c511.jpg"/>
+<div class="url">
+                  https://www.koumi-dc.com/test3/assets/images/implant/maintenance01.jpg
+                </div>
+</td>
+<td>
+<div class="forbidden-name">
+                  forbidden-images\×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)-20260908T040207Z-1-001.zip -&gt; ×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)/×_インプラント歯肉炎.jpg
+                </div>
+</td>
+<td class="score match">
+                98.3%
+              </td>
+<td>
+<b>MATCH</b>
+</td>
+</tr>
+<tr>
+<td>
+<img class="preview" src="assets/05e0c065200f.jpg"/>
+<div class="url">
+                  https://www.koumi-dc.com/test3/assets/images/implant/maintenance02.jpg
+                </div>
+</td>
+<td>
+<div class="forbidden-name">
+                  forbidden-images\×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)-20260908T040207Z-1-001.zip -&gt; ×_基本的に使用不可(サイズ不足や加工前の物、古い印象の写真)/×_インプラント_Fotolia_20631761_Subscription_XL.jpg
+                </div>
+</td>
+<td class="score possible">
+                93.0%
+              </td>
+<td>
+<b>POSSIBLE</b>
+</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>

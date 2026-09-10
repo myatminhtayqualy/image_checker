@@ -35,12 +35,14 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urldefrag, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -805,6 +807,254 @@ th {{
     )
 
 
+def project_summary(site_url, output_dir, stats, results):
+    """Build the compact, persistent data used by the all-project dashboard."""
+    issues = []
+    for item in results:
+        if item["status"] == "SAFE":
+            continue
+        issues.append({
+            "published_url": item["url"],
+            "forbidden": item["forbidden"],
+            "score": round(item["score"], 1),
+            "status": item["status"],
+        })
+
+    return {
+        "version": 1,
+        "site_url": site_url,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "project_folder": output_dir.name,
+        "stats": stats,
+        "issues": issues,
+    }
+
+
+def load_existing_project_summary(project_dir):
+    """Load a project summary; make a best-effort summary for old reports too."""
+    summary_path = project_dir / "summary.json"
+    try:
+        summary = load_json_file(summary_path, None)
+        if isinstance(summary, dict) and summary.get("version") == 1:
+            return summary
+    except ValueError:
+        pass
+
+    # Reports created before the dashboard have no JSON summary. Include them
+    # so existing checked projects do not disappear; a recheck replaces this
+    # fallback with a complete, up-to-date summary.
+    report_path = project_dir / "report.html"
+    if not report_path.is_file():
+        return None
+    try:
+        soup = BeautifulSoup(report_path.read_text(encoding="utf-8"), "html.parser")
+    except OSError:
+        return None
+
+    summary_text = soup.select_one(".summary")
+    text_value = summary_text.get_text(" ", strip=True) if summary_text else ""
+
+    def number_after(label):
+        match = re.search(rf"{re.escape(label)}:\s*(\d+)", text_value)
+        return int(match.group(1)) if match else 0
+
+    site_match = re.search(r"Site:\s*(https?://\S+)", text_value)
+    issues = []
+    for row in soup.select("tbody tr"):
+        cells = row.find_all("td")
+        if len(cells) != 4:
+            continue
+        status = cells[3].get_text(" ", strip=True)
+        if status not in {"MATCH", "POSSIBLE"}:
+            continue
+        score_match = re.search(r"[\d.]+", cells[2].get_text(" ", strip=True))
+        issues.append({
+            "published_url": cells[0].get_text(" ", strip=True),
+            "forbidden": cells[1].get_text(" ", strip=True),
+            "score": float(score_match.group()) if score_match else 0.0,
+            "status": status,
+        })
+
+    return {
+        "version": 1,
+        "site_url": site_match.group(1) if site_match else project_dir.name,
+        "checked_at": datetime.fromtimestamp(
+            report_path.stat().st_mtime, timezone.utc
+        ).isoformat(),
+        "project_folder": project_dir.name,
+        "stats": {
+            "pages": number_after("Pages crawled"),
+            "found": number_after("Website images found"),
+            "downloaded": number_after("Downloaded successfully"),
+            "reused": number_after("Reused from previous run"),
+            "forbidden": number_after("Forbidden images indexed"),
+            "match": number_after("MATCH"),
+            "possible": number_after("POSSIBLE"),
+            "safe": number_after("SAFE"),
+        },
+        "issues": issues,
+    }
+
+
+def generate_all_projects_report(results_root):
+    """Create one clear dashboard for every project already checked."""
+    results_root = Path(results_root)
+    projects = []
+    for project_dir in results_root.iterdir() if results_root.exists() else []:
+        if project_dir.is_dir():
+            summary = load_existing_project_summary(project_dir)
+            if summary:
+                projects.append(summary)
+
+    projects.sort(
+        key=lambda project: (
+            -project["stats"].get("match", 0),
+            -project["stats"].get("possible", 0),
+            project["site_url"],
+        )
+    )
+
+    total_match = sum(p["stats"].get("match", 0) for p in projects)
+    total_possible = sum(p["stats"].get("possible", 0) for p in projects)
+    total_images = sum(p["stats"].get("found", 0) for p in projects)
+    project_rows = []
+    issue_rows = []
+
+    for project in projects:
+        stats = project["stats"]
+        folder = project["project_folder"]
+        report_link = f"{folder}/report.html"
+        match_count = stats.get("match", 0)
+        possible_count = stats.get("possible", 0)
+        state = "Needs review" if match_count or possible_count else "Clear"
+        state_class = "needs-review" if match_count or possible_count else "clear"
+        checked_at = project.get("checked_at", "").replace("T", " ").replace("+00:00", " UTC")
+        project_rows.append(f"""
+            <tr>
+              <td><a href=\"{esc(report_link)}\">{esc(project["site_url"])}</a></td>
+              <td>{stats.get("found", 0)}</td>
+              <td class=\"match\">{match_count}</td>
+              <td class=\"possible\">{possible_count}</td>
+              <td><span class=\"badge {state_class}\">{state}</span></td>
+              <td class=\"checked\">{esc(checked_at)}</td>
+              <td><a class=\"button\" href=\"{esc(report_link)}\">Open report</a></td>
+            </tr>
+        """)
+
+        for issue in project.get("issues", []):
+            issue_rows.append(f"""
+                <tr>
+                  <td><a href=\"{esc(report_link)}\">{esc(project["site_url"])}</a></td>
+                  <td><b class=\"{esc(issue["status"].lower())}\">{esc(issue["status"])}</b></td>
+                  <td class=\"score {esc(issue["status"].lower())}\">{issue["score"]:.1f}%</td>
+                  <td class=\"wrap\">{esc(issue["published_url"])}</td>
+                  <td class=\"wrap mono\">{esc(issue["forbidden"])}</td>
+                  <td><a class=\"button\" href=\"{esc(report_link)}\">Details</a></td>
+                </tr>
+            """)
+
+    if not projects:
+        project_rows.append('<tr><td colspan="7" class="empty">No projects have been checked yet.</td></tr>')
+    if not issue_rows:
+        issue_rows.append('<tr><td colspan="6" class="empty clear-text">No MATCH or POSSIBLE images found.</td></tr>')
+
+    html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>All Projects - Clinic Image Check</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 30px; background: #f5f7fa; color: #1f2937; }}
+h1 {{ margin-bottom: 6px; }} .subtitle {{ color: #596579; margin-top: 0; }}
+.cards {{ display: flex; gap: 15px; flex-wrap: wrap; margin: 22px 0; }}
+.card {{ min-width: 170px; padding: 18px; border-radius: 10px; background: white; box-shadow: 0 1px 3px #0002; }}
+.card .number {{ display: block; font-size: 30px; font-weight: bold; margin-top: 5px; }}
+.card.match-card .number, .match {{ color: #b42318; }} .card.possible-card .number, .possible {{ color: #a15c00; }}
+h2 {{ margin-top: 34px; }} table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 1px 3px #0001; }}
+th, td {{ padding: 12px; border: 1px solid #d9dee7; text-align: left; vertical-align: top; }} th {{ background: #eaf0f7; }}
+a {{ color: #1557a0; }} .button {{ display: inline-block; padding: 6px 10px; color: white; background: #1557a0; border-radius: 5px; text-decoration: none; white-space: nowrap; }}
+.badge {{ padding: 4px 8px; border-radius: 999px; font-weight: bold; white-space: nowrap; }} .needs-review {{ color: #9a3412; background: #ffedd5; }} .clear {{ color: #166534; background: #dcfce7; }}
+.score {{ font-weight: bold; }} .wrap {{ max-width: 330px; overflow-wrap: anywhere; }} .mono {{ font-family: monospace; font-size: 12px; }} .checked {{ white-space: nowrap; font-size: 12px; color: #596579; }}
+.empty {{ text-align: center; padding: 28px; color: #596579; }} .clear-text {{ color: #166534; }}
+</style></head><body>
+<h1>All Projects — Image Check Summary</h1>
+<p class="subtitle">Latest result for each checked project. Rechecking a project automatically refreshes this page.</p>
+<div class="cards">
+  <div class="card"><span>Projects checked</span><span class="number">{len(projects)}</span></div>
+  <div class="card"><span>Website images checked</span><span class="number">{total_images}</span></div>
+  <div class="card match-card"><span>MATCH images</span><span class="number">{total_match}</span></div>
+  <div class="card possible-card"><span>POSSIBLE images</span><span class="number">{total_possible}</span></div>
+</div>
+<h2>Projects</h2><table><thead><tr><th>Project</th><th>Images checked</th><th>MATCH</th><th>POSSIBLE</th><th>Status</th><th>Last checked</th><th>Details</th></tr></thead><tbody>{''.join(project_rows)}</tbody></table>
+<h2>Images requiring review</h2><table><thead><tr><th>Project</th><th>Result</th><th>Score</th><th>Website image</th><th>Forbidden image</th><th>Details</th></tr></thead><tbody>{''.join(issue_rows)}</tbody></table>
+</body></html>"""
+    (results_root / "index.html").write_text(html, encoding="utf-8")
+
+
+def generate_github_pages(results_root, publish_root):
+    """Export reports as a small static site suitable for GitHub Pages.
+
+    The scanner's downloaded-image cache is intentionally not published. Only
+    previews that already appear in MATCH/POSSIBLE rows are copied.
+    """
+    results_root = Path(results_root)
+    publish_root = Path(publish_root)
+    staging_root = publish_root.with_name(publish_root.name + "-staging")
+
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True)
+
+    dashboard_path = results_root / "index.html"
+    if dashboard_path.is_file():
+        shutil.copy2(dashboard_path, staging_root / "index.html")
+
+    exported_reports = 0
+    exported_previews = 0
+    for project_dir in results_root.iterdir() if results_root.exists() else []:
+        if not project_dir.is_dir():
+            continue
+        report_path = project_dir / "report.html"
+        if not report_path.is_file():
+            continue
+
+        destination_dir = staging_root / project_dir.name
+        destination_dir.mkdir()
+        soup = BeautifulSoup(report_path.read_text(encoding="utf-8"), "html.parser")
+        download_dir = (project_dir / "downloaded").resolve()
+
+        for image in soup.select("img.preview"):
+            source_url = image.get("src", "")
+            parsed = urlparse(source_url)
+            if parsed.scheme != "file":
+                image.decompose()
+                continue
+            source_path = Path(unquote(parsed.path.lstrip("/"))).resolve()
+            if not source_path.is_file() or not source_path.is_relative_to(download_dir):
+                image.decompose()
+                continue
+
+            assets_dir = destination_dir / "assets"
+            assets_dir.mkdir(exist_ok=True)
+            asset_name = (
+                hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
+                + source_path.suffix.lower()
+            )
+            destination_image = assets_dir / asset_name
+            shutil.copy2(source_path, destination_image)
+            image["src"] = f"assets/{asset_name}"
+            exported_previews += 1
+
+        (destination_dir / "report.html").write_text(
+            str(soup), encoding="utf-8"
+        )
+        exported_reports += 1
+
+    (staging_root / ".nojekyll").write_text("", encoding="utf-8")
+    if publish_root.exists():
+        shutil.rmtree(publish_root)
+    staging_root.replace(publish_root)
+    return exported_reports, exported_previews
+
+
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
@@ -832,6 +1082,12 @@ def main():
         "--output",
         default="results",
         help="Output folder"
+    )
+
+    parser.add_argument(
+        "--publish-dir",
+        default="docs",
+        help="GitHub Pages export folder (set to an empty string to skip)"
     )
 
     parser.add_argument(
@@ -913,6 +1169,8 @@ def main():
             args.forbidden,
             "--output",
             args.output,
+            "--publish-dir",
+            args.publish_dir,
             "--threshold",
             str(args.threshold),
             "--match-threshold",
@@ -1211,6 +1469,17 @@ def main():
         args.match_threshold
     )
 
+    save_json_file(
+        output_dir / "summary.json",
+        project_summary(site_url, output_dir, stats, results),
+    )
+    generate_all_projects_report(Path(args.output))
+    published_reports = published_previews = 0
+    if args.publish_dir:
+        published_reports, published_previews = generate_github_pages(
+            Path(args.output), Path(args.publish_dir)
+        )
+
     print()
     print("========================================")
     print("DONE")
@@ -1243,6 +1512,14 @@ def main():
     print(
         f"Report: {report_path.resolve()}"
     )
+    print(
+        f"All-project summary: {(Path(args.output) / 'index.html').resolve()}"
+    )
+    if args.publish_dir:
+        print(
+            f"GitHub Pages export: {Path(args.publish_dir).resolve()} "
+            f"({published_reports} reports, {published_previews} previews)"
+        )
     print("========================================")
 
 

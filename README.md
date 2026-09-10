@@ -82,6 +82,9 @@ python checker.py
 
 Each site keeps its own `results/<domain>/` folder, report, and download
 cache. A single site can still be run with `python checker.py https://site.example`.
+Every completed run also refreshes `results/index.html`, an all-project
+dashboard. It shows the latest result per project, the number of MATCH and
+POSSIBLE images, and direct links to each project's detailed report.
 
 ## Run one project
 
@@ -110,6 +113,31 @@ results/
 Open `report.html` in Chrome.
 
 The report shows only MATCH and POSSIBLE results, so you don't have to look through every safe image.
+Open `results/index.html` to see all checked projects in one place. When a
+project is rechecked, its previous dashboard row is replaced with the newest
+counts and any newly found issues.
+
+## Share reports with GitHub Pages
+
+Each completed check also rebuilds `docs/`, the small publish-ready website.
+It contains the all-project dashboard and every project report, but copies only
+the downloaded previews shown in MATCH/POSSIBLE rows. The full `downloaded/`
+cache, forbidden-image archives, credentials, and local JSON caches are never
+included in `docs/`.
+
+Push the generated `docs/` folder and `.github/workflows/deploy-pages.yml` to
+the repository's `main` branch. The included workflow deploys the report to
+GitHub Pages after each push. If GitHub asks for a Pages source, choose
+**GitHub Actions** in the repository's **Settings → Pages**.
+
+To make the public export without running a new scan:
+
+```powershell
+.venv\Scripts\python.exe -c "import checker; from pathlib import Path; checker.generate_all_projects_report(Path('results')); print(checker.generate_github_pages(Path('results'), Path('docs')))"
+```
+
+Use `--publish-dir ""` when running the checker if you need to skip rebuilding
+the GitHub Pages export for a particular run.
 
 ## Forbidden-image cache
 
