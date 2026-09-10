@@ -13,7 +13,7 @@ The script:
   1. Downloads images from the supplied published page.
   2. Reads forbidden images, including images INSIDE ZIP files without
      extracting the ZIP to disk.
-  3. Creates perceptual hashes (pHash).
+  3. Creates two complementary perceptual hashes (pHash + dHash).
   4. Compares the published images against forbidden images.
   5. Generates an HTML report with side-by-side images.
 
@@ -217,19 +217,43 @@ def crawl_site(session, site_url, max_pages=1000):
 # IMAGE HASH
 # ---------------------------------------------------------
 
-def make_hash(image_bytes):
+def make_hashes(image_bytes):
+    """Return complementary fingerprints for an image.
+
+    pHash is good at finding resized/re-encoded copies, but it can give a
+    high score to unrelated images with a similarly simple brightness layout.
+    dHash captures edge structure instead, so using both substantially reduces
+    those false positives.
+    """
     with Image.open(io.BytesIO(image_bytes)) as im:
         im = im.convert("RGB")
-        return imagehash.phash(im)
+        return {
+            "phash": imagehash.phash(im),
+            "dhash": imagehash.dhash(im),
+        }
 
 
-def similarity(hash_a, hash_b):
+def hash_similarity(hash_a, hash_b):
     """
     pHash is normally 64 bits.
     Similarity is converted to 0-100%.
     """
     distance = hash_a - hash_b
     return max(0.0, 100.0 * (1.0 - distance / 64.0))
+
+
+def similarity(image_hashes, forbidden_hashes):
+    """Score a candidate using both tonal and structural image information."""
+    phash_score = hash_similarity(
+        image_hashes["phash"], forbidden_hashes["phash"]
+    )
+    dhash_score = hash_similarity(
+        image_hashes["dhash"], forbidden_hashes["dhash"]
+    )
+
+    # pHash remains slightly more important for tolerant duplicate detection,
+    # while dHash verifies that the image's visible structure also agrees.
+    return 0.55 * phash_score + 0.45 * dhash_score
 
 
 # ---------------------------------------------------------
@@ -257,7 +281,7 @@ def load_forbidden_cache(cache_path):
 
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-        if data.get("version") != 1:
+        if data.get("version") != 2:
             return {}
         return data.get("files", {})
     except (OSError, json.JSONDecodeError):
@@ -270,7 +294,7 @@ def save_forbidden_cache(cache_path, cache):
     temporary_path = cache_path.with_suffix(".tmp")
     temporary_path.write_text(
         json.dumps(
-            {"version": 1, "files": cache},
+            {"version": 2, "files": cache},
             indent=2,
         ),
         encoding="utf-8",
@@ -320,9 +344,14 @@ def scan_forbidden(folder):
                             cached_record["member"],
                         )
                     ),
-                    "hash": imagehash.hex_to_hash(
-                        cached_record["hash"]
-                    ),
+                    "hashes": {
+                        "phash": imagehash.hex_to_hash(
+                            cached_record["phash"]
+                        ),
+                        "dhash": imagehash.hex_to_hash(
+                            cached_record["dhash"]
+                        ),
+                    },
                     "source": cached_record["source"],
                 })
             new_cache[relative_name] = cached
@@ -336,16 +365,17 @@ def scan_forbidden(folder):
         if suffix in IMAGE_EXTS:
             try:
                 data = path.read_bytes()
-                h = make_hash(data)
+                hashes = make_hashes(data)
 
                 records.append({
                     "name": str(path),
-                    "hash": h,
+                    "hashes": hashes,
                     "source": "file",
                 })
                 cached_records.append({
                     "member": None,
-                    "hash": str(h),
+                    "phash": str(hashes["phash"]),
+                    "dhash": str(hashes["dhash"]),
                     "source": "file",
                 })
 
@@ -381,19 +411,20 @@ def scan_forbidden(folder):
                             # Nothing is extracted to disk.
                             data = z.read(member)
 
-                            h = make_hash(data)
+                            hashes = make_hashes(data)
 
                             records.append({
                                 "name": image_name_from_zip(
                                     path,
                                     member.filename
                                 ),
-                                "hash": h,
+                                "hashes": hashes,
                                 "source": "zip",
                             })
                             cached_records.append({
                                 "member": member.filename,
-                                "hash": str(h),
+                                "phash": str(hashes["phash"]),
+                                "dhash": str(hashes["dhash"]),
                                 "source": "zip",
                             })
 
@@ -1084,7 +1115,7 @@ def main():
             if cached_path.is_file():
                 try:
                     data = cached_path.read_bytes()
-                    make_hash(data)
+                    make_hashes(data)
                     downloaded = cached_path
                     stats["reused"] += 1
                 except (OSError, UnidentifiedImageError):
@@ -1109,7 +1140,7 @@ def main():
 
         try:
 
-            current_hash = make_hash(
+            current_hashes = make_hashes(
                 data
             )
 
@@ -1122,8 +1153,8 @@ def main():
         for forbidden_item in forbidden:
 
             score = similarity(
-                current_hash,
-                forbidden_item["hash"]
+                current_hashes,
+                forbidden_item["hashes"]
             )
 
             if score > best_score:

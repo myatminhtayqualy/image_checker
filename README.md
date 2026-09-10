@@ -114,7 +114,8 @@ The report shows only MATCH and POSSIBLE results, so you don't have to look thro
 ## Forbidden-image cache
 
 The first run creates `forbidden-images/.image-checker-cache.json`.
-Unchanged image files and ZIP archives reuse their cached pHash on later runs,
+Unchanged image files and ZIP archives reuse their cached pHash and dHash
+fingerprints on later runs,
 so ZIP files do not need to be opened again. The cache is automatically
 refreshed when a file's size or modified time changes.
 
@@ -143,6 +144,10 @@ password must be supplied together. Credentials are only sent through the
 HTTP session and are not written to the HTML report.
 
 ## Similarity thresholds
+
+The score combines pHash (overall visual layout) with dHash (edge structure).
+Using both prevents simple, similarly bright images from being reported as a
+possible match based on pHash alone.
 
 Default:
 
